@@ -1382,90 +1382,151 @@ async function fetchHolders(addr, chain) {
   const subEl = document.getElementById("holders-sub");
   if (!valEl || !addr) return;
 
-  valEl.innerHTML = `<span class="holders-loading"><div class="holders-mini-spin"></div> Fetching…</span>`;
+  valEl.innerHTML = `<span class="holders-loading"><div class="holders-mini-spin"></div> Fetching...</span>`;
   if (subEl) subEl.textContent = "Checking on-chain data";
 
-  // Etherscan API V2 - single base URL, chainid changes per chain
-  // Same key works for ALL chains
   const KEY = "7RSR8GU9W9FYUZ2FJJ1FDYEW285N393Y94";
-  const V2  = "https://api.etherscan.io/v2/api";
 
-  const CHAIN_IDS = {
-    ethereum:"1", base:"8453", bsc:"56",
-    arbitrum:"42161", polygon:"137",
-    avalanche:"43114", optimism:"10"
+  // Direct API URLs per chain — same key, different base URL
+  const APIS = {
+    ethereum:  "https://api.etherscan.io",
+    base:      "https://api.basescan.org",
+    bsc:       "https://api.bscscan.com",
+    arbitrum:  "https://api.arbiscan.io",
+    polygon:   "https://api.polygonscan.com",
+    avalanche: "https://api.snowtrace.io",
+    optimism:  "https://api-optimistic.etherscan.io",
   };
-  const CHAIN_NAMES = {
+
+  // Explorer page URLs — used as fallback button
+  const EXPLORERS = {
+    ethereum:  `https://etherscan.io/token/${addr}#balances`,
+    base:      `https://basescan.org/token/${addr}#balances`,
+    bsc:       `https://bscscan.com/token/${addr}#balances`,
+    arbitrum:  `https://arbiscan.io/token/${addr}#balances`,
+    polygon:   `https://polygonscan.com/token/${addr}#balances`,
+    avalanche: `https://snowtrace.io/token/${addr}#balances`,
+    optimism:  `https://optimistic.etherscan.io/token/${addr}#balances`,
+    solana:    `https://solscan.io/token/${addr}`,
+  };
+
+  const NAMES = {
     ethereum:"Etherscan", base:"Basescan", bsc:"BscScan",
     arbitrum:"Arbiscan", polygon:"Polygonscan",
-    avalanche:"Snowtrace", optimism:"Optimism"
+    avalanche:"Snowtrace", optimism:"Optimistic", solana:"Solscan"
   };
 
   let holders = null;
-  let source  = "";
+  let source = "";
 
-  const get = async (url) => {
+  const getJson = async (url) => {
     try {
-      const r = await fetch(url, { mode:"cors", signal: AbortSignal.timeout(10000) });
+      const r = await fetch(url, { mode:"cors", signal: AbortSignal.timeout(8000) });
       if (!r.ok) return null;
       return await r.json();
     } catch(_) { return null; }
   };
 
+  const showExplorerBtn = (chain) => {
+    const link = EXPLORERS[chain];
+    const name = NAMES[chain] || chain;
+    if (!link || !valEl) return;
+    valEl.innerHTML = `<a href="${link}" target="_blank"
+      style="display:inline-flex;align-items:center;gap:6px;
+             font-family:'Orbitron',monospace;font-size:11px;font-weight:600;
+             color:var(--c1);text-decoration:none;
+             padding:6px 12px;border:1px solid var(--c1);border-radius:8px;
+             background:rgba(0,255,229,0.06);"
+      onmouseover="this.style.background='rgba(0,255,229,0.14)'"
+      onmouseout="this.style.background='rgba(0,255,229,0.06)'">
+      View on ${name} &#8599;
+    </a>`;
+    if (subEl) subEl.innerHTML = `<span style="color:var(--text-dim)">Opens holder list in new tab</span>`;
+  };
+
   try {
-    const cid  = CHAIN_IDS[chain];
-    const name = CHAIN_NAMES[chain] || chain;
-
-    if (cid) {
-      // V2 Method 1: tokenholdercount - returns exact number
-      const d1 = await get(`${V2}?chainid=${cid}&module=token&action=tokenholdercount&contractaddress=${addr}&apikey=${KEY}`);
-      if (d1?.status === "1" && d1?.result) {
-        const n = parseInt(d1.result);
-        if (!isNaN(n) && n > 0) { holders = n; source = name; }
+    // ===== ETHEREUM — works reliably with key =====
+    if (chain === "ethereum") {
+      const d1 = await getJson(`https://api.etherscan.io/api?module=token&action=tokenholdercount&contractaddress=${addr}&apikey=${KEY}`);
+      if (d1?.status === "1" && parseInt(d1.result) > 0) {
+        holders = parseInt(d1.result); source = "Etherscan";
       }
-
-      // V2 Method 2: tokeninfo - holdersCount field
       if (!holders) {
-        const d2 = await get(`${V2}?chainid=${cid}&module=token&action=tokeninfo&contractaddress=${addr}&apikey=${KEY}`);
-        if (d2?.status === "1") {
-          const res = Array.isArray(d2.result) ? d2.result[0] : d2.result;
-          if (res?.holdersCount) {
-            const n = parseInt(res.holdersCount);
-            if (!isNaN(n) && n > 0) { holders = n; source = name; }
-          }
+        const d2 = await getJson(`https://api.etherscan.io/api?module=token&action=tokeninfo&contractaddress=${addr}&apikey=${KEY}`);
+        const res = d2?.result?.[0];
+        if (res?.holdersCount && parseInt(res.holdersCount) > 0) {
+          holders = parseInt(res.holdersCount); source = "Etherscan";
         }
       }
     }
 
-    // Solana - Solscan (no key needed)
-    if (!holders && chain === "solana") {
-      const d = await get(`https://public-api.solscan.io/token/holders?tokenAddress=${addr}&limit=1&offset=0`);
-      if (d?.total > 0) { holders = d.total; source = "Solscan"; }
+    // ===== BASE — try API, fall back to explorer button =====
+    else if (chain === "base") {
+      const d1 = await getJson(`https://api.basescan.org/api?module=token&action=tokenholdercount&contractaddress=${addr}&apikey=${KEY}`);
+      if (d1?.status === "1" && parseInt(d1.result) > 0) {
+        holders = parseInt(d1.result); source = "Basescan";
+      }
       if (!holders) {
-        const d2 = await get(`https://api-v2.solscan.io/v2/token/holders/count?token=${addr}`);
-        if (d2?.data?.holderCount > 0) { holders = d2.data.holderCount; source = "Solscan"; }
+        const d2 = await getJson(`https://api.basescan.org/api?module=token&action=tokeninfo&contractaddress=${addr}&apikey=${KEY}`);
+        const res = Array.isArray(d2?.result) ? d2.result[0] : d2?.result;
+        if (res?.holdersCount && parseInt(res.holdersCount) > 0) {
+          holders = parseInt(res.holdersCount); source = "Basescan";
+        }
       }
     }
 
-    // Display result
+    // ===== BSC =====
+    else if (chain === "bsc") {
+      const d1 = await getJson(`https://api.bscscan.com/api?module=token&action=tokenholdercount&contractaddress=${addr}&apikey=${KEY}`);
+      if (d1?.status === "1" && parseInt(d1.result) > 0) {
+        holders = parseInt(d1.result); source = "BscScan";
+      }
+      if (!holders) {
+        const d2 = await getJson(`https://api.bscscan.com/api?module=token&action=tokeninfo&contractaddress=${addr}&apikey=${KEY}`);
+        const res = Array.isArray(d2?.result) ? d2.result[0] : d2?.result;
+        if (res?.holdersCount && parseInt(res.holdersCount) > 0) {
+          holders = parseInt(res.holdersCount); source = "BscScan";
+        }
+      }
+    }
+
+    // ===== ARBITRUM =====
+    else if (chain === "arbitrum") {
+      const d1 = await getJson(`https://api.arbiscan.io/api?module=token&action=tokenholdercount&contractaddress=${addr}&apikey=${KEY}`);
+      if (d1?.status === "1" && parseInt(d1.result) > 0) {
+        holders = parseInt(d1.result); source = "Arbiscan";
+      }
+    }
+
+    // ===== POLYGON =====
+    else if (chain === "polygon") {
+      const d1 = await getJson(`https://api.polygonscan.com/api?module=token&action=tokenholdercount&contractaddress=${addr}&apikey=${KEY}`);
+      if (d1?.status === "1" && parseInt(d1.result) > 0) {
+        holders = parseInt(d1.result); source = "Polygonscan";
+      }
+    }
+
+    // ===== SOLANA =====
+    else if (chain === "solana") {
+      const d = await getJson(`https://public-api.solscan.io/token/holders?tokenAddress=${addr}&limit=1&offset=0`);
+      if (d?.total > 0) { holders = d.total; source = "Solscan"; }
+    }
+
+    // ===== DISPLAY =====
     if (holders && holders > 0) {
       const fmt = holders >= 1000000
         ? (holders/1000000).toFixed(2)+"M"
         : holders.toLocaleString();
       valEl.innerHTML = `<span style="font-family:'Orbitron',monospace;font-size:20px;font-weight:700;color:var(--green)">${fmt}</span>`;
       valEl.className = "stat-value";
-      if (subEl) subEl.innerHTML = `<span style="color:var(--text-dim)">Unique wallets · ${source}</span>`;
+      if (subEl) subEl.innerHTML = `<span style="color:var(--text-dim)">Unique wallets from ${source}</span>`;
     } else {
-      valEl.innerHTML = `<span style="font-family:'Orbitron',monospace;font-size:15px;color:var(--text-mid)">—</span>`;
-      valEl.className = "stat-value";
-      if (subEl) subEl.innerHTML = `<span style="color:var(--text-dim);font-size:9px">${
-        chain==="kaspa" ? "Kaspa not supported" : "Data unavailable"
-      }</span>`;
+      // Show explorer button instead of plain "N/A"
+      showExplorerBtn(chain);
     }
 
   } catch(e) {
-    valEl.innerHTML = `<span style="font-family:'Orbitron',monospace;font-size:15px;color:var(--text-dim)">—</span>`;
-    if (subEl) subEl.textContent = "Fetch error";
+    showExplorerBtn(chain);
   }
 }
 
