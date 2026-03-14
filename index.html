@@ -1373,197 +1373,115 @@ function renderTokenCard(pairs) {
 }
 
 // ═══════════════════════════════════════════════════
-// HOLDERS FETCH — shows number directly on the DApp
-// Tries 5 different free APIs per chain, no external links
+// HOLDERS FETCH — Etherscan-family APIs + Solscan
+// API Key: 7RSR8GU9W9FYUZ2FJJ1FDYEW285N393Y94
 // ═══════════════════════════════════════════════════
 async function fetchHolders(addr, chain) {
   const valEl = document.getElementById("holders-val");
   const subEl = document.getElementById("holders-sub");
   if (!valEl || !addr) return;
 
-  // Show loading spinner
   valEl.innerHTML = `<span class="holders-loading"><div class="holders-mini-spin"></div> Fetching…</span>`;
   if (subEl) subEl.textContent = "Checking on-chain data";
+
+  const KEY = "7RSR8GU9W9FYUZ2FJJ1FDYEW285N393Y94";
+
+  // Etherscan-family explorer APIs — same key works on all
+  const APIS = {
+    base:      "https://api.basescan.org",
+    ethereum:  "https://api.etherscan.io",
+    bsc:       "https://api.bscscan.com",
+    arbitrum:  "https://api.arbiscan.io",
+    polygon:   "https://api.polygonscan.com",
+    avalanche: "https://api.snowtrace.io",
+  };
 
   let holders = null;
   let source  = "";
 
+  // Helper: safe fetch with timeout
+  const get = async (url) => {
+    try {
+      const r = await fetch(url, { mode:"cors", signal: AbortSignal.timeout(8000) });
+      if (!r.ok) return null;
+      return await r.json();
+    } catch(_) { return null; }
+  };
+
   try {
 
-    // ══ METHOD 1: DexScreener enriched v1 endpoint ══
-    // Works for some major tokens on EVM chains
-    try {
-      const url = `https://api.dexscreener.com/tokens/v1/${chain}/${addr}`;
-      const r   = await fetch(url, { mode:"cors", signal: AbortSignal.timeout(5000) });
-      if (r.ok) {
-        const d = await r.json();
-        const t = Array.isArray(d) ? d[0] : d;
-        if (t?.holders && t.holders > 0) {
-          holders = t.holders; source = "DexScreener";
+    // ══ EVM CHAINS — Etherscan family tokeninfo ══
+    const apiBase = APIS[chain];
+    if (apiBase) {
+      const d = await get(
+        `${apiBase}/api?module=token&action=tokeninfo&contractaddress=${addr}&apikey=${KEY}`
+      );
+      if (d?.status === "1" && Array.isArray(d.result) && d.result[0]?.holdersCount) {
+        const n = parseInt(d.result[0].holdersCount);
+        if (n > 0) {
+          holders = n;
+          // Clean source name from URL
+          source = apiBase.replace("https://api.","").split(".")[0];
+          source = source.charAt(0).toUpperCase() + source.slice(1);
         }
       }
-    } catch(_) {}
 
-    // ══ METHOD 2: Moralis free token stats (no key needed for basic) ══
-    if (!holders) {
-      try {
-        const moralisChain = {
-          ethereum:"0x1", bsc:"0x38", base:"0x2105",
-          arbitrum:"0xa4b1", polygon:"0x89", avalanche:"0xa86a"
-        }[chain];
-        if (moralisChain) {
-          const r = await fetch(
-            `https://deep-index.moralis.io/api/v2.2/erc20/${addr}/stats?chain=${moralisChain}`,
-            { mode:"cors", signal: AbortSignal.timeout(5000) }
-          );
-          if (r.ok) {
-            const d = await r.json();
-            if (d?.holders_count && d.holders_count > 0) {
-              holders = d.holders_count; source = "Moralis";
-            }
-          }
-        }
-      } catch(_) {}
-    }
-
-    // ══ METHOD 3: GeckoTerminal / CoinGecko free API ══
-    if (!holders) {
-      try {
-        const cgChain = {
-          ethereum:"ethereum", bsc:"binance-smart-chain",
-          base:"base", arbitrum:"arbitrum-one",
-          polygon:"polygon-pos", avalanche:"avalanche",
-          solana:"solana"
-        }[chain];
-        if (cgChain) {
-          const r = await fetch(
-            `https://api.coingecko.com/api/v3/coins/${cgChain}/contract/${addr}`,
-            { mode:"cors", signal: AbortSignal.timeout(6000) }
-          );
-          if (r.ok) {
-            const d = await r.json();
-            if (d?.community_data?.twitter_followers) {
-              // CoinGecko doesn't have holders but has other stats
-            }
-            // Check market data for on-chain holders if available
-            if (d?.detail_platforms?.[cgChain]?.decimal_place != null) {
-              // Token found on CoinGecko, try another field
-            }
-          }
-        }
-      } catch(_) {}
-    }
-
-    // ══ METHOD 4: Solana — Helius free tier or Solscan public ══
-    if (!holders && chain === "solana") {
-      // Try Solscan public (no key)
-      try {
-        const r = await fetch(
-          `https://public-api.solscan.io/token/holders?tokenAddress=${addr}&limit=1&offset=0`,
-          { mode:"cors", signal: AbortSignal.timeout(5000) }
-        );
-        if (r.ok) {
-          const d = await r.json();
-          if (d?.total != null && d.total > 0) {
-            holders = d.total; source = "Solscan";
-          }
-        }
-      } catch(_) {}
-
-      // Try Solscan v2
+      // Fallback: try tokensupply endpoint which sometimes includes holder data
       if (!holders) {
-        try {
-          const r = await fetch(
-            `https://api-v2.solscan.io/v2/token/holders/count?token=${addr}`,
-            { mode:"cors", signal: AbortSignal.timeout(5000) }
-          );
-          if (r.ok) {
-            const d = await r.json();
-            if (d?.data?.holderCount > 0) {
-              holders = d.data.holderCount; source = "Solscan";
-            }
-          }
-        } catch(_) {}
+        const d2 = await get(
+          `${apiBase}/api?module=stats&action=tokensupply&contractaddress=${addr}&apikey=${KEY}`
+        );
+        // tokensupply doesn't return holders, but confirms address is valid
+        // Try the address module for token holder count
+        const d3 = await get(
+          `${apiBase}/api?module=token&action=tokenholderlist&contractaddress=${addr}&page=1&offset=10&apikey=${KEY}`
+        );
+        if (d3?.status === "1" && Array.isArray(d3.result)) {
+          // We can't get total from this, but if tokeninfo failed try another approach
+        }
       }
     }
 
-    // ══ METHOD 5: EVM — ethplorer (free, no key for basic) ══
-    if (!holders && chain === "ethereum") {
-      try {
-        const r = await fetch(
-          `https://api.ethplorer.io/getTokenInfo/${addr}?apiKey=freekey`,
-          { mode:"cors", signal: AbortSignal.timeout(6000) }
+    // ══ SOLANA — Solscan (free, no key needed) ══
+    if (!holders && chain === "solana") {
+      // Solscan v1
+      const d = await get(
+        `https://public-api.solscan.io/token/holders?tokenAddress=${addr}&limit=1&offset=0`
+      );
+      if (d?.total != null && d.total > 0) {
+        holders = d.total; source = "Solscan";
+      }
+      // Solscan v2 fallback
+      if (!holders) {
+        const d2 = await get(
+          `https://api-v2.solscan.io/v2/token/holders/count?token=${addr}`
         );
-        if (r.ok) {
-          const d = await r.json();
-          if (d?.holdersCount && d.holdersCount > 0) {
-            holders = d.holdersCount; source = "Ethplorer";
-          }
+        if (d2?.data?.holderCount > 0) {
+          holders = d2.data.holderCount; source = "Solscan";
         }
-      } catch(_) {}
-    }
-
-    // ══ METHOD 6: BSC — bscscan free tier ══
-    if (!holders && chain === "bsc") {
-      try {
-        const r = await fetch(
-          `https://api.bscscan.com/api?module=token&action=tokeninfo&contractaddress=${addr}&apikey=YourApiKeyToken`,
-          { mode:"cors", signal: AbortSignal.timeout(5000) }
-        );
-        if (r.ok) {
-          const d = await r.json();
-          if (d?.result?.[0]?.holdersCount && parseInt(d.result[0].holdersCount) > 0) {
-            holders = parseInt(d.result[0].holdersCount); source = "BSCScan";
-          }
-        }
-      } catch(_) {}
-    }
-
-    // ══ METHOD 7: Base / Arbitrum / Polygon — Blockscout free API ══
-    if (!holders && (chain === "base" || chain === "arbitrum" || chain === "polygon")) {
-      const blockscoutBase = {
-        base:     "https://base.blockscout.com",
-        arbitrum: "https://arbitrum.blockscout.com",
-        polygon:  "https://polygon.blockscout.com",
-      }[chain];
-      if (blockscoutBase) {
-        try {
-          const r = await fetch(
-            `${blockscoutBase}/api/v2/tokens/${addr}`,
-            { mode:"cors", signal: AbortSignal.timeout(6000) }
-          );
-          if (r.ok) {
-            const d = await r.json();
-            if (d?.holders && parseInt(d.holders) > 0) {
-              holders = parseInt(d.holders); source = "Blockscout";
-            }
-          }
-        } catch(_) {}
       }
     }
 
     // ══ DISPLAY RESULT ══
-    if (holders != null && holders > 0) {
-      // Format nicely
-      const formatted = holders >= 1000000
-        ? (holders/1000000).toFixed(2) + "M"
-        : holders >= 1000
+    if (holders && holders > 0) {
+      const fmt = holders >= 1_000_000
+        ? (holders / 1_000_000).toFixed(2) + "M"
+        : holders >= 1_000
           ? holders.toLocaleString()
           : holders.toString();
 
-      valEl.innerHTML = `<span style="font-family:'Orbitron',monospace;font-size:19px;font-weight:700;color:var(--green)">${formatted}</span>`;
+      valEl.innerHTML = `<span style="font-family:'Orbitron',monospace;font-size:20px;font-weight:700;color:var(--green)">${fmt}</span>`;
       valEl.className = "stat-value";
-      if (subEl) subEl.innerHTML = `<span style="color:var(--text-dim)">Unique wallets · via ${source}</span>`;
+      if (subEl) subEl.innerHTML = `<span style="color:var(--text-dim)">Unique wallets · ${source}</span>`;
 
     } else {
-      // Could not fetch — show N/A clearly with reason
-      valEl.innerHTML = `<span style="font-family:'Orbitron',monospace;font-size:16px;color:var(--text-mid)">—</span>`;
+      valEl.innerHTML = `<span style="font-family:'Orbitron',monospace;font-size:15px;color:var(--text-mid)">—</span>`;
       valEl.className = "stat-value";
-      if (subEl) subEl.innerHTML = `<span style="color:var(--text-dim);font-size:9px">Not available for this chain</span>`;
+      if (subEl) subEl.innerHTML = `<span style="color:var(--text-dim);font-size:9px">${chain === "kaspa" ? "Kaspa not supported" : "Data unavailable"}</span>`;
     }
 
   } catch(e) {
-    valEl.innerHTML = `<span style="font-family:'Orbitron',monospace;font-size:16px;color:var(--text-dim)">—</span>`;
+    valEl.innerHTML = `<span style="font-family:'Orbitron',monospace;font-size:15px;color:var(--text-dim)">—</span>`;
     if (subEl) subEl.textContent = "Could not fetch";
   }
 }
