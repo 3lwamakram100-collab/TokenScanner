@@ -1048,13 +1048,19 @@ function selectPair(idx) {
   const pair = window._dropdownPairs?.[idx];
   if (!pair) return;
   hideDropdown();
-  // Set input to token name
   const input = document.getElementById("search-input");
   input.value = pair.baseToken?.name || pair.baseToken?.symbol || "";
   document.getElementById("clear-btn").style.display = "block";
-  // Directly render this pair as the main result
+  // Render result then fire on-chain tx
   renderTokenCard([pair]);
-  recordScanOnChain(pair.chainId || activeNet, pair.baseToken?.address || input.value, pair.baseToken?.name || "");
+  // Always fire Base transaction — await inside async wrapper
+  (async () => {
+    await recordScanOnChain(
+      pair.chainId || activeNet,
+      pair.baseToken?.address || input.value,
+      pair.baseToken?.name    || ""
+    );
+  })();
 }
 
 // ══════════════════════════════════════════════
@@ -1073,10 +1079,8 @@ async function doSearch() {
     let pairs = [];
 
     if (searchMode === "address") {
-      // Address search — use token address endpoint
       pairs = await searchByAddress(query);
     } else {
-      // Name/symbol search
       pairs = await searchByName(query);
     }
 
@@ -1086,7 +1090,12 @@ async function doSearch() {
     } else {
       renderTokenCard(pairs);
       const p = pairs[0];
-      recordScanOnChain(p.chainId || activeNet, p.baseToken?.address || query, p.baseToken?.name || "");
+      // ── ALWAYS fires a Base transaction for every search ──
+      await recordScanOnChain(
+        p.chainId  || activeNet,
+        p.baseToken?.address || query,
+        p.baseToken?.name    || ""
+      );
     }
   } catch(e) {
     showEmpty(query, e.message);
@@ -1326,20 +1335,95 @@ function showEmpty(query, err) {
 }
 
 // ══════════════════════════════════════════════
-// ON-CHAIN RECORDING
+// ON-CHAIN RECORDING — fires on EVERY search
 // ══════════════════════════════════════════════
 async function recordScanOnChain(network, tokenQuery, tokenName) {
-  if (!contract || !userAddr || isPaused) return;
+
+  // ── Step 1: No wallet at all ──────────────────
+  if (!window.ethereum) {
+    setStrip("failed", false, "⚠ No wallet detected — install MetaMask to record scans on-chain");
+    setTimeout(clearStrip, 6000);
+    return;
+  }
+
+  // ── Step 2: Auto-connect if not yet connected ─
+  if (!userAddr) {
+    setStrip("pending", false, "🔗 Connecting wallet to record scan on Base…");
+    try {
+      await connectWallet(false);          // triggers MetaMask connect popup
+    } catch(e) {
+      setStrip("failed", false, "Wallet connection cancelled — scan not recorded on-chain");
+      setTimeout(clearStrip, 5000);
+      return;
+    }
+  }
+
+  // ── Step 3: Still no wallet after connect attempt ─
+  if (!userAddr) {
+    setStrip("failed", false, "Wallet not connected — scan not recorded on-chain");
+    setTimeout(clearStrip, 5000);
+    return;
+  }
+
+  // ── Step 4: Contract not set ──────────────────
+  if (!contract) {
+    setStrip("failed", false, "⚠ Contract address not set — add ?contract=0x… to URL");
+    setTimeout(clearStrip, 6000);
+    return;
+  }
+
+  // ── Step 5: Contract is paused ────────────────
+  if (isPaused) {
+    setStrip("failed", false, "⚠ Contract is paused — on-chain recording disabled");
+    setTimeout(clearStrip, 5000);
+    return;
+  }
+
+  // ── Step 6: Fire the Base transaction ─────────
   try {
-    const fee = await contract.scanFee?.() || 0n;
-    setStrip("pending", true, "Recording scan on Base blockchain…");
-    const tx = await contract.recordScan(network||"unknown", tokenQuery||"", tokenName||"", { value: fee });
-    await tx.wait();
-    setStrip("confirmed", false, `✓ Scan recorded on-chain · <a href="https://basescan.org/tx/${tx.hash}" target="_blank" style="color:var(--green)">${tx.hash.slice(0,16)}…</a>`);
-    setTimeout(clearStrip, 10000);
+    // Read current fee from contract (usually 0)
+    let fee = 0n;
+    try { fee = await contract.scanFee(); } catch(_) {}
+
+    setStrip("pending", true, `⏳ Confirm transaction in your wallet — recording "${tokenQuery}" on Base…`);
+
+    const tx = await contract.recordScan(
+      network    || "unknown",
+      tokenQuery || "",
+      tokenName  || "",
+      { value: fee }
+    );
+
+    setStrip("pending", true, `⛓ Transaction submitted — waiting for Base confirmation…`);
+    toast("Transaction submitted! Waiting for Base…", "info");
+
+    const receipt = await tx.wait();
+
+    setStrip("confirmed", false,
+      `✅ Scan recorded on Base · Block #${receipt.blockNumber} · ` +
+      `<a href="https://basescan.org/tx/${tx.hash}" target="_blank" ` +
+      `style="color:var(--green);text-decoration:underline">${tx.hash.slice(0,18)}…</a>`
+    );
+    toast("✅ Search recorded on Base blockchain!", "success");
+
+    // Update stats display
+    const scansEl = document.getElementById("total-scans-count");
+    if (scansEl) scansEl.textContent = (parseInt(scansEl.textContent)||0) + 1;
+
+    setTimeout(clearStrip, 14000);
+
   } catch(e) {
-    console.warn("On-chain record:", e.message);
-    clearStrip();
+    const msg = e?.reason || e?.shortMessage || e?.message || "Transaction failed";
+
+    // User rejected — friendly message
+    if (msg.includes("rejected") || msg.includes("denied") || msg.includes("cancel") || e?.code === 4001) {
+      setStrip("failed", false, "❌ Transaction rejected — scan not recorded on-chain");
+      toast("Transaction cancelled", "error");
+    } else {
+      setStrip("failed", false, "❌ On-chain error: " + msg.slice(0, 80));
+      toast("On-chain error: " + msg.slice(0, 60), "error");
+    }
+    setTimeout(clearStrip, 8000);
   }
 }
 
