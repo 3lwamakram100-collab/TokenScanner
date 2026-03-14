@@ -841,7 +841,7 @@ const OWNER       = "0x9BbE3f747011fEe98DD86DF9eea9DD92FFA89Bac";
 const BASE_ID     = 8453;
 const BASE_TEST   = 84532;
 let CONTRACT_ADDR = new URLSearchParams(location.search).get("contract")
-                    || localStorage.getItem("ts_contract") || "";
+                    || localStorage.getItem("ts_contract") || "0x9C770f07e3CEB323F729F1a598983F00A0eDf5cb";
 
 const ABI = [
   "function recordScan(string network, string tokenQuery, string tokenName) payable",
