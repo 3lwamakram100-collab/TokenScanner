@@ -1373,8 +1373,9 @@ function renderTokenCard(pairs) {
 }
 
 // ═══════════════════════════════════════════════════
-// HOLDERS FETCH — Etherscan-family APIs + Solscan
-// API Key: 7RSR8GU9W9FYUZ2FJJ1FDYEW285N393Y94
+// HOLDERS FETCH — Etherscan V2 unified API
+// Same key works on all chains — just change the URL
+// Key: 7RSR8GU9W9FYUZ2FJJ1FDYEW285N393Y94
 // ═══════════════════════════════════════════════════
 async function fetchHolders(addr, chain) {
   const valEl = document.getElementById("holders-val");
@@ -1386,23 +1387,26 @@ async function fetchHolders(addr, chain) {
 
   const KEY = "7RSR8GU9W9FYUZ2FJJ1FDYEW285N393Y94";
 
-  // Etherscan-family explorer APIs — same key works on all
-  const APIS = {
-    base:      "https://api.basescan.org",
-    ethereum:  "https://api.etherscan.io",
-    bsc:       "https://api.bscscan.com",
-    arbitrum:  "https://api.arbiscan.io",
-    polygon:   "https://api.polygonscan.com",
-    avalanche: "https://api.snowtrace.io",
+  // Each chain has its own URL but same API key works on all
+  const CHAIN_URLS = {
+    ethereum:  { url: "https://api.etherscan.io",              name: "Etherscan"   },
+    base:      { url: "https://api.basescan.org",              name: "Basescan"    },
+    bsc:       { url: "https://api.bscscan.com",               name: "BscScan"     },
+    arbitrum:  { url: "https://api.arbiscan.io",               name: "Arbiscan"    },
+    polygon:   { url: "https://api.polygonscan.com",           name: "Polygonscan" },
+    avalanche: { url: "https://api.snowtrace.io",              name: "Snowtrace"   },
+    optimism:  { url: "https://api-optimistic.etherscan.io",   name: "Optimism"    },
   };
 
   let holders = null;
   let source  = "";
 
-  // Helper: safe fetch with timeout
   const get = async (url) => {
     try {
-      const r = await fetch(url, { mode:"cors", signal: AbortSignal.timeout(8000) });
+      const r = await fetch(url, {
+        mode: "cors",
+        signal: AbortSignal.timeout(10000)
+      });
       if (!r.ok) return null;
       return await r.json();
     } catch(_) { return null; }
@@ -1410,48 +1414,61 @@ async function fetchHolders(addr, chain) {
 
   try {
 
-    // ══ EVM CHAINS — Etherscan family tokeninfo ══
-    const apiBase = APIS[chain];
-    if (apiBase) {
-      const d = await get(
-        `${apiBase}/api?module=token&action=tokeninfo&contractaddress=${addr}&apikey=${KEY}`
+    // ══ EVM CHAINS — Etherscan V2 (same key, different URL) ══
+    const chainCfg = CHAIN_URLS[chain];
+    if (chainCfg) {
+      const { url, name } = chainCfg;
+
+      // ── Try 1: tokenholdercount — direct count ──
+      const d1 = await get(
+        `${url}/api?module=token&action=tokenholdercount&contractaddress=${addr}&apikey=${KEY}`
       );
-      if (d?.status === "1" && Array.isArray(d.result) && d.result[0]?.holdersCount) {
-        const n = parseInt(d.result[0].holdersCount);
-        if (n > 0) {
-          holders = n;
-          // Clean source name from URL
-          source = apiBase.replace("https://api.","").split(".")[0];
-          source = source.charAt(0).toUpperCase() + source.slice(1);
+      if (d1?.status === "1" && d1?.result) {
+        const n = parseInt(d1.result);
+        if (!isNaN(n) && n > 0) { holders = n; source = name; }
+      }
+
+      // ── Try 2: tokeninfo — holdersCount field ──
+      if (!holders) {
+        const d2 = await get(
+          `${url}/api?module=token&action=tokeninfo&contractaddress=${addr}&apikey=${KEY}`
+        );
+        if (d2?.status === "1") {
+          const res = Array.isArray(d2.result) ? d2.result[0] : d2.result;
+          if (res?.holdersCount) {
+            const n = parseInt(res.holdersCount);
+            if (!isNaN(n) && n > 0) { holders = n; source = name; }
+          }
         }
       }
 
-      // Fallback: try tokensupply endpoint which sometimes includes holder data
+      // ── Try 3: Etherscan V2 unified endpoint with chainid param ──
       if (!holders) {
-        const d2 = await get(
-          `${apiBase}/api?module=stats&action=tokensupply&contractaddress=${addr}&apikey=${KEY}`
-        );
-        // tokensupply doesn't return holders, but confirms address is valid
-        // Try the address module for token holder count
-        const d3 = await get(
-          `${apiBase}/api?module=token&action=tokenholderlist&contractaddress=${addr}&page=1&offset=10&apikey=${KEY}`
-        );
-        if (d3?.status === "1" && Array.isArray(d3.result)) {
-          // We can't get total from this, but if tokeninfo failed try another approach
+        const chainIds = {
+          ethereum:"1", base:"8453", bsc:"56",
+          arbitrum:"42161", polygon:"137",
+          avalanche:"43114", optimism:"10"
+        };
+        const chainId = chainIds[chain];
+        if (chainId) {
+          const d3 = await get(
+            `https://api.etherscan.io/v2/api?chainid=${chainId}&module=token&action=tokenholdercount&contractaddress=${addr}&apikey=${KEY}`
+          );
+          if (d3?.status === "1" && d3?.result) {
+            const n = parseInt(d3.result);
+            if (!isNaN(n) && n > 0) { holders = n; source = name + " V2"; }
+          }
         }
       }
     }
 
-    // ══ SOLANA — Solscan (free, no key needed) ══
+    // ══ SOLANA — Solscan (no key needed) ══
     if (!holders && chain === "solana") {
-      // Solscan v1
       const d = await get(
         `https://public-api.solscan.io/token/holders?tokenAddress=${addr}&limit=1&offset=0`
       );
-      if (d?.total != null && d.total > 0) {
-        holders = d.total; source = "Solscan";
-      }
-      // Solscan v2 fallback
+      if (d?.total > 0) { holders = d.total; source = "Solscan"; }
+
       if (!holders) {
         const d2 = await get(
           `https://api-v2.solscan.io/v2/token/holders/count?token=${addr}`
@@ -1462,13 +1479,11 @@ async function fetchHolders(addr, chain) {
       }
     }
 
-    // ══ DISPLAY RESULT ══
+    // ══ DISPLAY ══
     if (holders && holders > 0) {
       const fmt = holders >= 1_000_000
         ? (holders / 1_000_000).toFixed(2) + "M"
-        : holders >= 1_000
-          ? holders.toLocaleString()
-          : holders.toString();
+        : holders.toLocaleString();
 
       valEl.innerHTML = `<span style="font-family:'Orbitron',monospace;font-size:20px;font-weight:700;color:var(--green)">${fmt}</span>`;
       valEl.className = "stat-value";
@@ -1477,12 +1492,16 @@ async function fetchHolders(addr, chain) {
     } else {
       valEl.innerHTML = `<span style="font-family:'Orbitron',monospace;font-size:15px;color:var(--text-mid)">—</span>`;
       valEl.className = "stat-value";
-      if (subEl) subEl.innerHTML = `<span style="color:var(--text-dim);font-size:9px">${chain === "kaspa" ? "Kaspa not supported" : "Data unavailable"}</span>`;
+      if (subEl) subEl.innerHTML = `<span style="color:var(--text-dim);font-size:9px">${
+        chain === "kaspa"  ? "Kaspa not supported"  :
+        chain === "solana" ? "Solscan unavailable"  :
+        "Not indexed yet"
+      }</span>`;
     }
 
   } catch(e) {
     valEl.innerHTML = `<span style="font-family:'Orbitron',monospace;font-size:15px;color:var(--text-dim)">—</span>`;
-    if (subEl) subEl.textContent = "Could not fetch";
+    if (subEl) subEl.textContent = "Fetch error";
   }
 }
 
